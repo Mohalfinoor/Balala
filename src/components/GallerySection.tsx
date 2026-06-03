@@ -44,6 +44,33 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
   const [objectPosition, setObjectPosition] = useState({ x: 0, y: 20 });
   const [isPlacing, setIsPlacing] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Advanced Gyroscopic & Camera Pan Anchoring systems
+  const [initialOrientation, setInitialOrientation] = useState<{ alpha: number; beta: number; gamma: number } | null>(null);
+  const [orientationOffset, setOrientationOffset] = useState({ x: 0, y: 0 });
+  const [isWallAnchored, setIsWallAnchored] = useState(true);
+  const [wallSide, setWallSide] = useState<"front" | "left" | "right">("front");
+  const [cameraPanX, setCameraPanX] = useState(0);
+  const [cameraPanY, setCameraPanY] = useState(0);
+
+  // Recalibrate and center the physical wall-mounted alignment
+  const recalibrateWallAnchor = () => {
+    setInitialOrientation(null);
+    setOrientationOffset({ x: 0, y: 0 });
+    setCameraPanX(0);
+    setCameraPanY(0);
+  };
+
+  // Compute the 3D perspective skew strings for left, right, and flat walls
+  const getWallTransform = () => {
+    if (wallSide === "left") {
+      return "perspective(800px) rotateY(28deg) skewY(2deg)";
+    }
+    if (wallSide === "right") {
+      return "perspective(800px) rotateY(-28deg) skewY(-2deg)";
+    }
+    return "perspective(800px) rotateY(0deg) skewY(0deg)";
+  };
   
   // AI Story generation values
   const [generatingStory, setGeneratingStory] = useState(false);
@@ -68,12 +95,18 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        setCameraActive(true);
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn("Autoplay block prevented playing immediately:", playErr);
+        }
       }
+      setCameraActive(true);
     } catch (err) {
       console.warn("Camera streaming unavailable", err);
       alert("Tidak dapat mengakses kamera. Menggunakan simulasi latar belakang ruang nyata.");
       setSelectedBackdrop("living-room");
+      setCameraActive(false);
     }
   };
 
@@ -87,13 +120,51 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
   };
 
   useEffect(() => {
-    if (arMode === "AR" && cameraActive) {
+    if (arMode === "AR") {
       startCamera();
     } else {
       stopCamera();
     }
     return () => stopCamera();
   }, [arMode]);
+
+  // Real-time device orientation tracking hook for spatial mapping fallbacks
+  useEffect(() => {
+    if (!isWallAnchored || arMode !== "AR") {
+      setOrientationOffset({ x: 0, y: 0 });
+      return;
+    }
+
+    const handleOrientation = (e: DeviceOrientationEvent) => {
+      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      
+      // Store initial references
+      if (!initialOrientation) {
+        setInitialOrientation({ alpha: e.alpha, beta: e.beta, gamma: e.gamma });
+        return;
+      }
+
+      let diffAlpha = e.alpha - initialOrientation.alpha;
+      let diffBeta = e.beta - initialOrientation.beta;
+
+      if (diffAlpha > 180) diffAlpha -= 360;
+      if (diffAlpha < -180) diffAlpha += 360;
+      if (diffBeta > 180) diffBeta -= 360;
+      if (diffBeta < -180) diffBeta += 360;
+
+      // Map rotation angles to screen pixels to keep objects locked on the virtual coordinate
+      const sensitivity = 6; 
+      setOrientationOffset({
+        x: diffAlpha * sensitivity,
+        y: -diffBeta * sensitivity
+      });
+    };
+
+    window.addEventListener("deviceorientation", handleOrientation);
+    return () => {
+      window.removeEventListener("deviceorientation", handleOrientation);
+    };
+  }, [isWallAnchored, arMode, initialOrientation]);
 
   // Handle Drag on Interactive 3D model
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -238,6 +309,7 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
                 setArMode("3D");
                 setScale(1);
                 setRotation({ x: 12, y: -20 });
+                recalibrateWallAnchor();
               }}
               id={`craft_card_${item.id}`}
             >
@@ -308,12 +380,7 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
                     <Rotate3d className="w-4 h-4" /> Rotasi 3D
                   </button>
                   <button
-                    onClick={() => {
-                      setArMode("AR");
-                      if (!cameraActive) {
-                        startCamera();
-                      }
-                    }}
+                    onClick={() => setArMode("AR")}
                     className={`flex items-center gap-1 px-4 py-1.5 rounded-md text-xs font-bold transition ${
                       arMode === "AR" ? "bg-white text-neutral-900 shadow-sm" : "text-neutral-500 hover:text-neutral-900"
                     }`}
@@ -420,58 +487,159 @@ export default function GallerySection({ onAddToCart, geminiConfigured }: Galler
                 {/* AR SIMULATION MODE */}
                 {arMode === "AR" && (
                   <div className="absolute inset-0 flex items-center justify-center">
-                    {/* Backing Image or Real-feed */}
-                    {cameraActive ? (
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        className="absolute inset-0 w-full h-full object-cover"
-                      />
-                    ) : (
-                      <img
-                        src={backdrops.find(b => b.id === selectedBackdrop)?.url}
-                        alt="Environment Backdrop"
-                        className="absolute inset-0 w-full h-full object-cover brightness-[0.85] contrast-[1.05]"
-                      />
-                    )}
+                    {/* Fallback environment backdrop */}
+                    <img
+                      src={backdrops.find(b => b.id === selectedBackdrop)?.url}
+                      alt="Environment Backdrop"
+                      className="absolute inset-0 w-full h-full object-cover brightness-[0.85] contrast-[1.05] z-0 transition-transform duration-100 ease-out"
+                      style={{
+                        transform: `scale(1.25) translate(${cameraPanX}px, ${cameraPanY}px)`
+                      }}
+                    />
+
+                    {/* Camera real-feed stream that sits on top when active */}
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 z-10`}
+                      style={{
+                        transform: `scale(1.25) translate(${cameraPanX}px, ${cameraPanY}px)`
+                      }}
+                    />
 
                     {/* Drop shadow / Grid surface indicator on environment */}
-                    <div className="absolute inset-x-0 bottom-12 h-20 border-t border-dashed border-white/25 bg-radial-gradient from-transparent to-black/10 flex items-center justify-center select-none pointer-events-none">
-                      <div className="text-[10px] text-white/50 bg-black/60 px-2 py-1 rounded">Bidang permukaan terdeteksi</div>
+                    <div className="absolute inset-x-0 bottom-12 h-20 border-t border-dashed border-white/25 bg-radial-gradient from-transparent to-black/10 flex items-center justify-center select-none pointer-events-none z-20">
+                      <div className="text-[10px] text-white/50 bg-black/60 px-2 py-1 rounded flex items-center gap-1.5 backdrop-blur-xs">
+                        <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></span>
+                        <span>Bidang vertikal (tembok) terdeteksi & terkalibrasi</span>
+                      </div>
                     </div>
 
-                    {/* Interactive Object Layer */}
+                    {/* Interactive Object Layer with physical locking offsets */}
                     <div
-                      className="absolute max-w-[180px] sm:max-w-[220px] cursor-move flex flex-col items-center justify-center origin-center transition-all duration-75"
+                      className="absolute max-w-[170px] sm:max-w-[210px] cursor-move flex flex-col items-center justify-center origin-center transition-all duration-75 z-25"
                       style={{
-                        transform: `translate(${objectPosition.x}px, ${objectPosition.y}px) scale(${scale})`,
-                        filter: "drop-shadow(0 20px 25px rgba(0, 0, 0, 0.8))"
+                        transform: `translate(${objectPosition.x + (isWallAnchored ? cameraPanX + orientationOffset.x : 0)}px, ${objectPosition.y + (isWallAnchored ? cameraPanY + orientationOffset.y : 0)}px) scale(${scale})`,
+                        filter: "drop-shadow(0 25px 30px rgba(0, 0, 0, 0.75))"
                       }}
                     >
                       {/* Physical Ruler Overlays which satisfy Problem Statement 1 */}
-                      <div className="absolute -top-6 px-2 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[9px] font-mono text-white flex items-center gap-1 select-none pointer-events-none">
+                      <div className="absolute -top-7 px-2 py-0.5 bg-neutral-900 border border-neutral-700 rounded text-[9px] font-mono text-white flex items-center gap-1 select-none pointer-events-none shadow-md z-40">
                         <span>P: {selectedItem.dimensions_cm.w}cm</span>
                         <span>x</span>
                         <span>T: {selectedItem.dimensions_cm.h}cm</span>
                       </div>
                       
-                      <img
-                        src={selectedItem.imageUrl}
-                        alt={selectedItem.name}
-                        referrerPolicy="no-referrer"
-                        className="w-full object-contain rounded-lg border-2 border-amber-500/10"
-                      />
+                      <div className="relative group/overlay w-full">
+                        {/* Dynamic Wall orientation 3D skew */}
+                        <img
+                          src={selectedItem.imageUrl}
+                          alt={selectedItem.name}
+                          referrerPolicy="no-referrer"
+                          className="w-full object-contain rounded-lg border-2 border-amber-500/15 transition-all duration-300 pointer-events-none"
+                          style={{
+                            transform: getWallTransform(),
+                            boxShadow: wallSide === "left" 
+                              ? "-18px 18px 30px rgba(0,0,0,0.65)" 
+                              : wallSide === "right" 
+                              ? "18px 18px 30px rgba(0,0,0,0.65)" 
+                              : "0 22px 35px rgba(0,0,0,0.6)"
+                          }}
+                        />
+
+                        {/* Anchored status pin badge */}
+                        {isWallAnchored && (
+                          <div className="absolute -bottom-2 right-2 bg-emerald-600 border border-neutral-900 text-white text-[8px] font-extrabold px-1.5 py-0.5 rounded shadow-sm opacity-90 pointer-events-none flex items-center gap-1">
+                            <Lock className="w-2.5 h-2.5" /> JANGKAR MEMPEL
+                          </div>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="absolute bottom-4 left-4 bg-black/75 backdrop-blur-md px-3 py-1.5 rounded-lg text-[9px] text-white/95 max-w-[220px] pointer-events-none select-none border border-neutral-800">
-                      <strong>Ketidakpastian Dimensi Terjawab:</strong> Skala visualisasi ini dihitung akurat berdasarkan dimensi fisik asli ({selectedItem.dimensions}). Anda bisa menyeret objek ke mana saja.
+                    {/* Info bar explaining Wall attachment state */}
+                    <div className="absolute bottom-4 left-4 bg-black/85 backdrop-blur-md px-3 py-2 rounded-xl text-[9px] text-white/95 max-w-[210px] pointer-events-none select-none border border-neutral-800 z-30 space-y-1">
+                      <div className="font-bold flex items-center gap-1 text-amber-400">
+                        <Lock className="w-3 h-3" />
+                        <span>Kunci Spasial Aktif</span>
+                      </div>
+                      <p className="text-neutral-300 leading-tight">
+                        Ornamen terkunci di dinding asal ({wallSide === "front" ? "Tengah" : wallSide === "left" ? "Kiri" : "Kanan"}). Jika kamera bergeser/goyang, posisinya diatur tetap di sana.
+                      </p>
+                    </div>
+
+                    {/* Floating Calibration Deck & Joystick for Wall Lock System */}
+                    <div className="absolute top-4 right-4 bg-neutral-950/90 border border-neutral-800 backdrop-blur-md p-3.5 rounded-2xl z-30 w-52 flex flex-col gap-2.5 shadow-lg select-auto text-white">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-amber-500 font-extrabold tracking-wider uppercase">Sistem Jangkar AR</span>
+                        <button
+                          onClick={recalibrateWallAnchor}
+                          className="text-[8px] bg-neutral-800 hover:bg-neutral-700 px-1.5 py-0.5 rounded font-bold text-neutral-300 transition"
+                          title="Reset center point"
+                        >
+                          Reset
+                        </button>
+                      </div>
+
+                      {/* 1. Toggle Lock Anchor */}
+                      <button
+                        onClick={() => setIsWallAnchored(!isWallAnchored)}
+                        className={`w-full py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition ${
+                          isWallAnchored 
+                            ? "bg-emerald-600 text-white hover:bg-emerald-700" 
+                            : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>{isWallAnchored ? "Jangkar Tembok: ON" : "Jangkar Tembok: OFF"}</span>
+                      </button>
+
+                      {/* 2. Choose Wall Perspective Plane */}
+                      <div className="space-y-1">
+                        <span className="text-[8px] text-neutral-400 font-bold block">Sisi Tempel Tempel Dinding:</span>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(["left", "front", "right"] as const).map((side) => (
+                            <button
+                              key={side}
+                              onClick={() => setWallSide(side)}
+                              className={`py-1 rounded text-[8px] font-extrabold capitalize border transition ${
+                                wallSide === side
+                                  ? "bg-amber-500 border-amber-500 text-neutral-950"
+                                  : "border-neutral-800 text-neutral-400 hover:bg-neutral-900"
+                              }`}
+                            >
+                              {side === "left" ? "Kiri 🧱" : side === "right" ? "Kanan 🧱" : "Tengah 🧱"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* 3. Simulate camera panning movement */}
+                      <div className="space-y-1 border-t border-neutral-800/60 pt-2 text-[8px]">
+                        <div className="flex justify-between text-neutral-400">
+                          <span className="font-bold">Uji Kamera Geser (Simulasi):</span>
+                          <span className="font-mono">{cameraPanX}px</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-120"
+                          max="120"
+                          step="5"
+                          value={cameraPanX}
+                          onChange={(e) => setCameraPanX(p => parseInt(e.target.value))}
+                          className="w-full accent-amber-500 text-amber-500 bg-neutral-800 h-1.5 rounded-lg cursor-pointer"
+                        />
+                        <p className="text-[7px] text-neutral-500 leading-none italic mt-0.5">
+                          Geser slider ini untuk mengerakkan kamera. Objek akan tetap mengunci di titik tembok.
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}
 
                 {/* Workspace Dimension Control (Scale) */}
-                <div className="absolute left-4 bottom-4 bg-neutral-900/90 border border-neutral-800 backdrop-blur-md p-3 rounded-xl z-10 flex flex-col gap-1 w-44">
+                <div className="absolute left-4 bottom-4 bg-neutral-900/90 border border-neutral-800 backdrop-blur-md p-3 rounded-xl z-25 flex flex-col gap-1 w-44">
                   <span className="text-[10px] text-neutral-400 font-bold tracking-wider uppercase">Penskalaan Realistis</span>
                   <div className="flex items-center justify-between mt-1 gap-2.5">
                     <span className="text-[9px] text-white">Scale: {(scale * 100).toFixed(0)}%</span>
