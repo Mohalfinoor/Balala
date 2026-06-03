@@ -1,0 +1,6 @@
+{
+  "name": "Balla-AR",
+  "description": "Platform e-commerce kerajinan khas Sulawesi Selatan berbasis Augmented Reality (AR) dan Storytelling Budaya Digital terintegrasi dengan Dashboard UMKM.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
